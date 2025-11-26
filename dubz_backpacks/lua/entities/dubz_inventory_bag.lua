@@ -1,5 +1,9 @@
 AddCSLuaFile()
 
+ENT = ENT or {}
+ENT.Type = "anim"
+ENT.Base = "base_anim"
+
 DUBZ_INVENTORY = DUBZ_INVENTORY or {}
 local config = DUBZ_INVENTORY.Config or {
     Capacity         = 10,
@@ -340,6 +344,7 @@ if SERVER then
     util.AddNetworkString("DubzInventory_Tip")
     util.AddNetworkString("DubzInventory_RequestOpen")
     util.AddNetworkString("DubzInventory_PocketAction")
+    util.AddNetworkString("DubzInventory_DropBag")
 
     local function writeNetItem(data)
         net.WriteString(data.class or "")
@@ -650,6 +655,14 @@ if SERVER then
 
         DUBZ_INVENTORY.OpenFor(ply, bag)
     end)
+
+    net.Receive("DubzInventory_DropBag", function(_, ply)
+        local bag = net.ReadEntity()
+        if not verifyContainer(ply, bag) then return end
+        if bag.BagOwner ~= ply then return end
+
+        bag:DropFromPlayer(ply)
+    end)
 end
 
 --------------------------------------------------------------------
@@ -768,73 +781,25 @@ end
 function BaseBag:Use(activator)
     if CLIENT then return end
     if not (IsValid(activator) and activator:IsPlayer()) then return end
-    if self.IsCarried then return end
 
-    if DUBZ_INVENTORY and DUBZ_INVENTORY.OpenFor then
-        DUBZ_INVENTORY.OpenFor(activator, self)
-    end
-end
-
------------------------------------------------------
---  THINK LOOP — DETECT RIGHT-CLICK FOR PICKUP
------------------------------------------------------
-local lastRMB = {}
-
-function BaseBag:Think()
-    if CLIENT then return end
-    if self.IsCarried then return end
-
-    for _, ply in ipairs(player.GetAll()) do
-        if not IsValid(ply) then continue end
-
-        local tr = ply:GetEyeTrace()
-        if tr.Entity ~= self then continue end
-        if tr.HitPos:DistToSqr(ply:GetShootPos()) > (110 * 110) then continue end
-
-        local isRMB  = ply:KeyDown(IN_ATTACK2)
-        local wasRMB = lastRMB[ply] or false
-
-        -- Don't pickup if player is using physgun or gravity gun (so they can move it)
-        local wep = ply:GetActiveWeapon()
-        if IsValid(wep) then
-            local class = wep:GetClass()
-            if class == "weapon_physgun" or class == "weapon_physcannon" then
-                lastRMB[ply] = isRMB
-                continue
-            end
+    if self.IsCarried then
+        if self.BagOwner ~= activator then
+            DUBZ_INVENTORY.SendTip(activator, "Someone else is wearing this bag")
         end
-
-        -- Normal pickup behavior
-        if isRMB and not wasRMB then
-            self:PickupBag(ply)
-        end
-
-        lastRMB[ply] = isRMB
-    end
-
-    self:NextThink(CurTime())
-    return true
-end
-
------------------------------------------------------
---  RIGHT CLICK PICKUP → GIVE SWEP, ATTACH BAG
------------------------------------------------------
-function BaseBag:PickupBag(ply)
-    if not IsValid(ply) or not ply:IsPlayer() then return end
-    if self.IsCarried then return end
-
-    if ply:HasWeapon("dubz_inventory") then
-        DUBZ_INVENTORY.SendTip(ply, "Drop your current backpack first")
         return
     end
 
-    ply:Give("dubz_inventory")
-    self:AttachToPlayer(ply)
-    self:SetPos(ply:GetPos())
-    self:SetParent(ply)
+    if IsValid(activator.DubzInventoryBag) then
+        DUBZ_INVENTORY.SendTip(activator, "Drop your current backpack first")
+        return
+    end
+
+    self:AttachToPlayer(activator)
+    self:SetPos(activator:GetPos())
+    self:SetParent(activator)
 
     if DUBZ_INVENTORY.SendTip then
-        DUBZ_INVENTORY.SendTip(ply, "Picked up your backpack")
+        DUBZ_INVENTORY.SendTip(activator, "Equipped your backpack")
     end
 end
 
@@ -1037,6 +1002,18 @@ if CLIENT then
         info:SetText(string.format("Backpack capacity: %d / %d", #items, capacity))
         info:DockMargin(8, 6, 0, 0)
 
+        local dropButton = vgui.Create("DButton", top)
+        dropButton:Dock(RIGHT)
+        dropButton:SetText("Drop Backpack")
+        dropButton:SetWide(120)
+        dropButton:DockMargin(0, 4, 8, 4)
+        dropButton.DoClick = function()
+            net.Start("DubzInventory_DropBag")
+            net.WriteEntity(container)
+            net.SendToServer()
+            frame:Close()
+        end
+
         local containerPanel = vgui.Create("DPanel", frame)
         containerPanel:Dock(FILL)
         containerPanel:DockPadding(8, 8, 8, 8)
@@ -1172,6 +1149,5 @@ if SERVER then
     hook.Add("PlayerDeath", "DubzInventory_DropOnDeath", function(ply)
         if not IsValid(ply.DubzInventoryBag) then return end
         ply.DubzInventoryBag:DropFromPlayer(ply)
-        ply:StripWeapon("dubz_inventory")
     end)
 end
