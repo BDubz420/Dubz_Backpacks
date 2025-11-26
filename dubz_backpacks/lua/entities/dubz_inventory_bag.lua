@@ -7,7 +7,7 @@ ENT.Base = "base_anim"
 DUBZ_INVENTORY = DUBZ_INVENTORY or {}
 local config = DUBZ_INVENTORY.Config or {
     Capacity         = 10,
-    Category         = "Dubz Utilities",
+    Category         = "Dubz Backpacks",
     BackpackKey      = KEY_B,
     ColorBackground  = Color(0, 0, 0, 190),
     ColorPanel       = Color(24, 28, 38),
@@ -18,7 +18,7 @@ local config = DUBZ_INVENTORY.Config or {
         ["dubz_inventory_bag"] = {
             PrintName    = "Dubz Backpack",
             Model        = "models/props_c17/BriefCase001a.mdl",
-            Category     = "Dubz Entities",
+            Category     = "Dubz Backpacks",
             Capacity     = 20,
             AttachOffset = Vector(-5, 12, -3),
             AttachAngles = Angle(90, 0, -180),
@@ -30,7 +30,7 @@ local bagDefinitions = config.Backpacks or {}
 local defaultBag = bagDefinitions["dubz_inventory_bag"] or {
     PrintName    = "Dubz Backpack",
     Model        = "models/props_c17/BriefCase001a.mdl",
-    Category     = "Dubz Entities",
+    Category     = config.Category or "Dubz Backpacks",
     Capacity     = config.Capacity or 10,
     AttachOffset = Vector(-5, 12, -3),
     AttachAngles = Angle(90, 0, -180),
@@ -672,7 +672,7 @@ local BaseBag = {}
 BaseBag.Type        = "anim"
 BaseBag.Base        = "base_anim"
 BaseBag.PrintName   = defaultBag.PrintName
-BaseBag.Category    = defaultBag.Category
+BaseBag.Category    = defaultBag.Category or config.Category or "Dubz Backpacks"
 BaseBag.Spawnable   = true
 BaseBag.RenderGroup = RENDERGROUP_OPAQUE
 BaseBag.BagConfig   = defaultBag
@@ -703,6 +703,7 @@ function BaseBag:Initialize()
     self:PhysicsInit(SOLID_VPHYSICS)
     self:SetMoveType(MOVETYPE_VPHYSICS)
     self:SetSolid(SOLID_VPHYSICS)
+    self:SetCollisionGroup(COLLISION_GROUP_WEAPON)
     self:SetUseType(SIMPLE_USE)
 
     self.StoredItems   = self.StoredItems or {}
@@ -722,7 +723,10 @@ function BaseBag:AttachToPlayer(ply)
     self.BagOwner  = ply
     ply.DubzInventoryBag = self
 
-    self:SetNoDraw(true) -- the visible model is clientside
+    self:SetNoDraw(false)
+    self:SetMoveType(MOVETYPE_NONE)
+    self:SetSolid(SOLID_NONE)
+    self:SetCollisionGroup(COLLISION_GROUP_IN_VEHICLE)
     self:SetParent(ply)
 
     local bone = ply:LookupBone("ValveBiped.Bip01_Spine2")
@@ -744,6 +748,7 @@ function BaseBag:DropFromPlayer(ply)
     end
 
     self:SetParent(nil)
+    self:PhysicsInit(SOLID_VPHYSICS)
     self:SetMoveType(MOVETYPE_VPHYSICS)
     self:SetSolid(SOLID_VPHYSICS)
     self:SetCollisionGroup(COLLISION_GROUP_WEAPON)
@@ -889,7 +894,7 @@ end
 --------------------------------------------------------------------
 ENT = table.Copy(BaseBag)
 ENT.PrintName = defaultBag.PrintName
-ENT.Category  = defaultBag.Category
+ENT.Category  = defaultBag.Category or config.Category or "Dubz Backpacks"
 ENT.BagConfig = defaultBag
 
 for className, cfg in pairs(bagDefinitions) do

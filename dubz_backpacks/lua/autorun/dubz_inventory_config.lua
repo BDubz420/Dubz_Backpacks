@@ -2,7 +2,7 @@ DUBZ_INVENTORY = DUBZ_INVENTORY or {}
 
 DUBZ_INVENTORY.Config = {
     Capacity = 10,
-    Category = "Dubz Utilities",
+    Category = "Dubz Backpacks",
     BackpackKey = KEY_B,
     ColorBackground = Color(0, 0, 0, 190),
     ColorPanel = Color(24, 28, 38),
@@ -12,7 +12,7 @@ DUBZ_INVENTORY.Config = {
         ["dubz_inventory_bag"] = {
             PrintName     = "Dubz Backpack",
             Model         = "models/props_c17/BriefCase001a.mdl",
-            Category      = "Dubz Entities",
+            Category      = "Dubz Backpacks",
             Capacity      = 20,
             AttachOffset  = Vector(-5, 12, -3),
             AttachAngles  = Angle(90, 0, -180),
