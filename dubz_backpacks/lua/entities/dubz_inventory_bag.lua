@@ -45,6 +45,10 @@ local function cleanItems(container)
     return container.StoredItems
 end
 
+function DUBZ_INVENTORY.GetItems(container)
+    return cleanItems(container)
+end
+
 local function containerCapacity(container)
     if not IsValid(container) then return config.Capacity or 10 end
 
@@ -114,6 +118,25 @@ function DUBZ_INVENTORY.RemoveItem(container, index, amount)
 
     data.quantity = take
     return data
+end
+
+function DUBZ_INVENTORY.MoveItem(fromContainer, toContainer, index, amount)
+    local taken = DUBZ_INVENTORY.RemoveItem(fromContainer, index, amount)
+    if not taken then return false end
+
+    if DUBZ_INVENTORY.AddItem(toContainer, taken) then
+        return true
+    end
+
+    -- put the item back if the transfer fails
+    DUBZ_INVENTORY.AddItem(fromContainer, taken)
+    return false
+end
+
+function DUBZ_INVENTORY.DropToWorld(ply, data)
+    if not (IsValid(ply) and data and data.class) then return false end
+    if not spawnWorldItem then return false end
+    return spawnWorldItem(ply, data)
 end
 
 function DUBZ_INVENTORY.SendTip(ply, msg)
@@ -345,6 +368,7 @@ if SERVER then
     util.AddNetworkString("DubzInventory_RequestOpen")
     util.AddNetworkString("DubzInventory_PocketAction")
     util.AddNetworkString("DubzInventory_DropBag")
+    util.AddNetworkString("DubzInventory_EquipBag")
 
     local function writeNetItem(data)
         net.WriteString(data.class or "")
@@ -392,6 +416,32 @@ if SERVER then
             net.WriteUInt(data.pocketIndex or 0, 8)
         end
         net.Send(ply)
+    end
+
+    local function canEquipBag(ply, ent)
+        if not (IsValid(ply) and ply:IsPlayer()) then return false end
+        if not verifyContainer(ply, ent) then return false end
+
+        if ent.IsCarried then
+            DUBZ_INVENTORY.SendTip(ply, "Someone else is wearing this bag")
+            return false
+        end
+
+        if IsValid(ply.DubzInventoryBag) then
+            DUBZ_INVENTORY.SendTip(ply, "You already have a backpack equipped")
+            return false
+        end
+
+        return true
+    end
+
+    local function equipBag(ply, ent)
+        if not canEquipBag(ply, ent) then return end
+
+        ent:AttachToPlayer(ply)
+        ent:SetPos(ply:GetPos())
+        ent:SetParent(ply)
+        DUBZ_INVENTORY.SendTip(ply, "Equipped your backpack")
     end
 
     local function validModelPath(path)
@@ -663,6 +713,23 @@ if SERVER then
 
         bag:DropFromPlayer(ply)
     end)
+
+    net.Receive("DubzInventory_EquipBag", function(_, ply)
+        local ent = net.ReadEntity()
+        equipBag(ply, ent)
+    end)
+
+    hook.Add("KeyPress", "DubzInventory_RClickPickup", function(ply, key)
+        if key ~= IN_ATTACK2 then return end
+        if IsValid(ply.DubzInventoryBag) then return end
+
+        local tr = ply:GetEyeTrace()
+        local ent = tr.Entity
+        if not verifyContainer(ply, ent) then return end
+        if tr.HitPos:DistToSqr(ply:EyePos()) > 22500 then return end
+
+        equipBag(ply, ent)
+    end)
 end
 
 --------------------------------------------------------------------
@@ -722,6 +789,12 @@ function BaseBag:AttachToPlayer(ply)
     self.IsCarried = true
     self.BagOwner  = ply
     ply.DubzInventoryBag = self
+    if ply.SetNWEntity then
+        ply:SetNWEntity("DubzInventoryBag", self)
+    end
+    if self.SetNWEntity then
+        self:SetNWEntity("DubzBagOwner", ply)
+    end
 
     self:SetNoDraw(false)
     self:SetMoveType(MOVETYPE_NONE)
@@ -745,6 +818,13 @@ function BaseBag:DropFromPlayer(ply)
 
     if IsValid(ply) then
         ply.DubzInventoryBag = nil
+        if ply.SetNWEntity then
+            ply:SetNWEntity("DubzInventoryBag", NULL)
+        end
+    end
+
+    if self.SetNWEntity then
+        self:SetNWEntity("DubzBagOwner", NULL)
     end
 
     self:SetParent(nil)
@@ -794,18 +874,7 @@ function BaseBag:Use(activator)
         return
     end
 
-    if IsValid(activator.DubzInventoryBag) then
-        DUBZ_INVENTORY.SendTip(activator, "Drop your current backpack first")
-        return
-    end
-
-    self:AttachToPlayer(activator)
-    self:SetPos(activator:GetPos())
-    self:SetParent(activator)
-
-    if DUBZ_INVENTORY.SendTip then
-        DUBZ_INVENTORY.SendTip(activator, "Equipped your backpack")
-    end
+    DUBZ_INVENTORY.OpenFor(activator, self)
 end
 
 -----------------------------------------------------
@@ -1012,6 +1081,8 @@ if CLIENT then
         dropButton:SetText("Drop Backpack")
         dropButton:SetWide(120)
         dropButton:DockMargin(0, 4, 8, 4)
+        local owner = IsValid(container) and container:GetNWEntity("DubzBagOwner")
+        dropButton:SetVisible(IsValid(owner) and owner == LocalPlayer())
         dropButton.DoClick = function()
             net.Start("DubzInventory_DropBag")
             net.WriteEntity(container)
@@ -1133,12 +1204,78 @@ if CLIENT then
         surface.PlaySound("buttons/button15.wav")
     end)
 
+    local holdStart, holdTriggered
+
+    local function getEquippedBag()
+        local ply = LocalPlayer()
+        if not IsValid(ply) then return nil end
+        return ply:GetNWEntity("DubzInventoryBag")
+    end
+
     hook.Add("PlayerButtonDown", "DubzInventory_OpenKey", function(ply, button)
         if ply ~= LocalPlayer() then return end
         if button ~= (config.BackpackKey or KEY_B) then return end
 
+        holdStart = CurTime()
+        holdTriggered = false
+    end)
+
+    hook.Add("PlayerButtonUp", "DubzInventory_OpenKey", function(ply, button)
+        if ply ~= LocalPlayer() then return end
+        if button ~= (config.BackpackKey or KEY_B) then return end
+
+        if holdTriggered then
+            holdStart = nil
+            return
+        end
+
+        if not IsValid(getEquippedBag()) then
+            notification.AddLegacy("You don't have a backpack equipped", NOTIFY_GENERIC, 3)
+            holdStart = nil
+            return
+        end
+
         net.Start("DubzInventory_RequestOpen")
         net.SendToServer()
+        holdStart = nil
+    end)
+
+    hook.Add("Think", "DubzInventory_BackpackHold", function()
+        if not holdStart then return end
+        if not input.IsKeyDown(config.BackpackKey or KEY_B) then
+            holdStart = nil
+            return
+        end
+
+        local bag = getEquippedBag()
+        if not IsValid(bag) then
+            holdStart = nil
+            return
+        end
+
+        if not holdTriggered and CurTime() - holdStart >= 3 then
+            holdTriggered = true
+            net.Start("DubzInventory_DropBag")
+            net.WriteEntity(bag)
+            net.SendToServer()
+            holdStart = nil
+        end
+    end)
+
+    hook.Add("HUDPaint", "DubzInventory_BackpackHoldHUD", function()
+        if not holdStart then return end
+        local bag = getEquippedBag()
+        if not IsValid(bag) then return end
+
+        local elapsed = CurTime() - holdStart
+        local frac = math.Clamp(elapsed / 3, 0, 1)
+
+        local w, h = 220, 18
+        local x, y = ScrW() / 2 - w / 2, ScrH() * 0.8
+
+        draw.RoundedBox(4, x, y, w, h, config.ColorBackground)
+        draw.RoundedBox(4, x + 2, y + 2, (w - 4) * frac, h - 4, config.ColorAccent)
+        draw.SimpleText("Hold to drop backpack", "DermaDefault", x + w / 2, y + h / 2, config.ColorText, TEXT_ALIGN_CENTER, TEXT_ALIGN_CENTER)
     end)
 end
 
