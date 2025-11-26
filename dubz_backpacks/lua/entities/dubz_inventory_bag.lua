@@ -1,23 +1,35 @@
 AddCSLuaFile()
 
-ENT.Type        = "anim"
-ENT.Base        = "base_anim"
-ENT.PrintName   = "Dubz Backpack"
-ENT.Category    = "Dubz Entities"
-ENT.Spawnable   = true
-ENT.RenderGroup = RENDERGROUP_OPAQUE
-
-local BAG_MODEL = "models/props_c17/BriefCase001a.mdl"
-
 DUBZ_INVENTORY = DUBZ_INVENTORY or {}
-
 local config = DUBZ_INVENTORY.Config or {
     Capacity         = 10,
+    Category         = "Dubz Utilities",
+    BackpackKey      = KEY_B,
     ColorBackground  = Color(0, 0, 0, 190),
     ColorPanel       = Color(24, 28, 38),
     ColorAccent      = Color(25, 178, 208),
     ColorText        = Color(230, 234, 242),
-    PocketWhitelist  = {}
+    PocketWhitelist  = {},
+    Backpacks        = {
+        ["dubz_inventory_bag"] = {
+            PrintName    = "Dubz Backpack",
+            Model        = "models/props_c17/BriefCase001a.mdl",
+            Category     = "Dubz Entities",
+            Capacity     = 20,
+            AttachOffset = Vector(-5, 12, -3),
+            AttachAngles = Angle(90, 0, -180),
+        }
+    }
+}
+
+local bagDefinitions = config.Backpacks or {}
+local defaultBag = bagDefinitions["dubz_inventory_bag"] or {
+    PrintName    = "Dubz Backpack",
+    Model        = "models/props_c17/BriefCase001a.mdl",
+    Category     = "Dubz Entities",
+    Capacity     = config.Capacity or 10,
+    AttachOffset = Vector(-5, 12, -3),
+    AttachAngles = Angle(90, 0, -180),
 }
 
 --------------------------------------------------------------------
@@ -27,6 +39,17 @@ local function cleanItems(container)
     if not IsValid(container) then return {} end
     container.StoredItems = container.StoredItems or {}
     return container.StoredItems
+end
+
+local function containerCapacity(container)
+    if not IsValid(container) then return config.Capacity or 10 end
+
+    if container.GetBagCapacity then
+        return container:GetBagCapacity()
+    end
+
+    local bagCfg = bagDefinitions[container:GetClass()] or defaultBag
+    return bagCfg.Capacity or config.Capacity or 10
 end
 
 local function subMaterialsMatch(a, b)
@@ -66,7 +89,7 @@ function DUBZ_INVENTORY.AddItem(container, itemData)
         end
     end
 
-    if #items >= config.Capacity then return false end
+    if #items >= containerCapacity(container) then return false end
 
     itemData.quantity = itemData.quantity or 1
     table.insert(items, itemData)
@@ -241,12 +264,82 @@ local function BuildItemData(ent)
 end
 
 --------------------------------------------------------------------
+-- POCKET HELPERS
+--------------------------------------------------------------------
+local function getPocketItems(ply)
+    if ply.getPocketItems then
+        local items = ply:getPocketItems()
+        if items then return items end
+    end
+
+    if DarkRP and DarkRP.getPocketItems then
+        local items = DarkRP.getPocketItems(ply)
+        if items then return items end
+    end
+
+    return ply.darkRPPocket or {}
+end
+
+local function removePocketItem(ply, index)
+    if not IsValid(ply) then return nil end
+
+    if ply.dropPocketItem then
+        return ply:dropPocketItem(index)
+    end
+
+    if DarkRP and DarkRP.retrievePocketItem then
+        return DarkRP.retrievePocketItem(ply, index)
+    end
+
+    local pocket = ply.darkRPPocket
+    if not pocket then return nil end
+
+    local ent = pocket[index]
+    if not ent then return nil end
+    table.remove(pocket, index)
+    return ent
+end
+
+local function addPocketItem(ply, ent)
+    if not IsValid(ply) or not IsValid(ent) then return false end
+
+    if ply.addPocketItem then
+        return ply:addPocketItem(ent)
+    end
+
+    if DarkRP and DarkRP.storePocketItem then
+        return DarkRP.storePocketItem(ply, ent)
+    end
+
+    ply.darkRPPocket = ply.darkRPPocket or {}
+    table.insert(ply.darkRPPocket, ent)
+    return true
+end
+
+local function pocketItemData(ply)
+    local items = {}
+    for idx, ent in ipairs(getPocketItems(ply)) do
+        if IsValid(ent) then
+            local data = BuildItemData(ent)
+            if data then
+                data.quantity = 1
+                data.pocketIndex = idx
+                table.insert(items, data)
+            end
+        end
+    end
+    return items
+end
+
+--------------------------------------------------------------------
 -- NETWORKING / MENU
 --------------------------------------------------------------------
 if SERVER then
     util.AddNetworkString("DubzInventory_Open")
     util.AddNetworkString("DubzInventory_Action")
     util.AddNetworkString("DubzInventory_Tip")
+    util.AddNetworkString("DubzInventory_RequestOpen")
+    util.AddNetworkString("DubzInventory_PocketAction")
 
     local function writeNetItem(data)
         net.WriteString(data.class or "")
@@ -266,7 +359,7 @@ if SERVER then
 
     local function verifyContainer(ply, ent)
         if not (IsValid(ply) and IsValid(ent)) then return false end
-        if ent:GetClass() ~= "dubz_inventory_bag" then return false end
+        if ent:GetClass() ~= "dubz_inventory_bag" and not bagDefinitions[ent:GetClass()] then return false end
 
         local maxDist = 200 * 200
         if ent:GetPos():DistToSqr(ply:GetPos()) > maxDist then return false end
@@ -278,12 +371,20 @@ if SERVER then
         if not verifyContainer(ply, container) then return end
 
         local items = cleanItems(container)
+        local pocket = pocketItemData(ply)
 
         net.Start("DubzInventory_Open")
         net.WriteEntity(container)
+        net.WriteUInt(containerCapacity(container), 8)
         net.WriteUInt(#items, 8)
         for _, data in ipairs(items) do
             writeNetItem(data)
+        end
+
+        net.WriteUInt(#pocket, 8)
+        for _, data in ipairs(pocket) do
+            writeNetItem(data)
+            net.WriteUInt(data.pocketIndex or 0, 8)
         end
         net.Send(ply)
     end
@@ -312,15 +413,14 @@ if SERVER then
 
         local eyePos = ply:EyePos()
         local eyeAng = ply:EyeAngles()
-        local tr = util.TraceLine({
+        util.TraceLine({
             start  = eyePos,
             endpos = eyePos + eyeAng:Forward() * 85,
             filter = ply
         })
 
-        -- Offset to the player's right side
         local right = eyeAng:Right()
-        pos = eyePos + right * 30 + eyeAng:Forward() * 15
+        local pos = eyePos + right * 30 + eyeAng:Forward() * 15
 
         local ang = Angle(0, eyeAng.yaw, 0)
         local ent = ents.Create(data.class)
@@ -491,15 +591,102 @@ if SERVER then
 
         DUBZ_INVENTORY.OpenFor(ply, container)
     end)
+
+    net.Receive("DubzInventory_PocketAction", function(_, ply)
+        local container = net.ReadEntity()
+        local action    = net.ReadString()
+        local pocketIdx = net.ReadUInt(8)
+
+        if action == "pocket_to_bag" then
+            if not verifyContainer(ply, container) then return end
+
+            local ent = removePocketItem(ply, pocketIdx)
+            if not IsValid(ent) then return end
+
+            local item = BuildItemData(ent)
+            if not item then return end
+
+            if not DUBZ_INVENTORY.AddItem(container, item) then
+                addPocketItem(ply, ent)
+                DUBZ_INVENTORY.SendTip(ply, "Backpack is full")
+                return
+            end
+
+            ent:Remove()
+            DUBZ_INVENTORY.SendTip(ply, "Moved item to backpack")
+            DUBZ_INVENTORY.OpenFor(ply, container)
+
+        elseif action == "drop_pocket" then
+            local ent = removePocketItem(ply, pocketIdx)
+            if not IsValid(ent) then return end
+
+            local eyePos = ply:EyePos()
+            local eyeAng = ply:EyeAngles()
+            local pos = eyePos + eyeAng:Forward() * 40
+            ent:SetPos(pos)
+            ent:SetAngles(Angle(0, eyeAng.yaw, 0))
+            ent:SetParent(nil)
+            ent:SetMoveType(MOVETYPE_VPHYSICS)
+            ent:SetSolid(SOLID_VPHYSICS)
+            ent:Spawn()
+            ent:Activate()
+
+            local phys = ent:GetPhysicsObject()
+            if IsValid(phys) then
+                phys:SetVelocity(ply:GetAimVector() * 120)
+                phys:Wake()
+            end
+
+            DUBZ_INVENTORY.SendTip(ply, "Dropped pocket item")
+        end
+    end)
+
+    net.Receive("DubzInventory_RequestOpen", function(_, ply)
+        local bag = IsValid(ply.DubzInventoryBag) and ply.DubzInventoryBag or nil
+        if not IsValid(bag) then
+            DUBZ_INVENTORY.SendTip(ply, "You don't have a backpack equipped")
+            return
+        end
+
+        DUBZ_INVENTORY.OpenFor(ply, bag)
+    end)
 end
 
 --------------------------------------------------------------------
 -- ENTITY INSTANCE (SERVER)
 --------------------------------------------------------------------
-function ENT:Initialize()
+local BaseBag = {}
+BaseBag.Type        = "anim"
+BaseBag.Base        = "base_anim"
+BaseBag.PrintName   = defaultBag.PrintName
+BaseBag.Category    = defaultBag.Category
+BaseBag.Spawnable   = true
+BaseBag.RenderGroup = RENDERGROUP_OPAQUE
+BaseBag.BagConfig   = defaultBag
+
+function BaseBag:GetBagConfig()
+    return bagDefinitions[self:GetClass()] or self.BagConfig or defaultBag
+end
+
+function BaseBag:GetBagCapacity()
+    local cfg = self:GetBagConfig()
+    return cfg.Capacity or config.Capacity or 10
+end
+
+function BaseBag:GetBagOffsets()
+    local cfg = self:GetBagConfig()
+    return cfg.AttachOffset or Vector(-5, 12, -3), cfg.AttachAngles or Angle(90, 0, -180)
+end
+
+function BaseBag:GetBagModel()
+    local cfg = self:GetBagConfig()
+    return cfg.Model or defaultBag.Model
+end
+
+function BaseBag:Initialize()
     if CLIENT then return end
 
-    self:SetModel(BAG_MODEL)
+    self:SetModel(self:GetBagModel())
     self:PhysicsInit(SOLID_VPHYSICS)
     self:SetMoveType(MOVETYPE_VPHYSICS)
     self:SetSolid(SOLID_VPHYSICS)
@@ -515,11 +702,12 @@ function ENT:Initialize()
     end
 end
 
-function ENT:AttachToPlayer(ply)
+function BaseBag:AttachToPlayer(ply)
     if not IsValid(ply) then return end
 
     self.IsCarried = true
     self.BagOwner  = ply
+    ply.DubzInventoryBag = self
 
     self:SetNoDraw(true) -- the visible model is clientside
     self:SetParent(ply)
@@ -529,15 +717,18 @@ function ENT:AttachToPlayer(ply)
         self:FollowBone(ply, bone)
     end
 
-    self.BasePos = Vector(-5, 12, -3)
-    self.BaseAng = Angle(90, 0, -180)
+    self.BasePos, self.BaseAng = self:GetBagOffsets()
 end
 
-function ENT:DropFromPlayer(ply)
+function BaseBag:DropFromPlayer(ply)
     if not IsValid(self) then return end
 
     self.IsCarried = false
     self.BagOwner  = nil
+
+    if IsValid(ply) then
+        ply.DubzInventoryBag = nil
+    end
 
     self:SetParent(nil)
     self:SetMoveType(MOVETYPE_VPHYSICS)
@@ -574,7 +765,7 @@ end
 -----------------------------------------------------
 --  E KEY = OPEN MENU (ONLY WHEN BAG ON GROUND)
 -----------------------------------------------------
-function ENT:Use(activator)
+function BaseBag:Use(activator)
     if CLIENT then return end
     if not (IsValid(activator) and activator:IsPlayer()) then return end
     if self.IsCarried then return end
@@ -589,7 +780,7 @@ end
 -----------------------------------------------------
 local lastRMB = {}
 
-function ENT:Think()
+function BaseBag:Think()
     if CLIENT then return end
     if self.IsCarried then return end
 
@@ -628,7 +819,7 @@ end
 -----------------------------------------------------
 --  RIGHT CLICK PICKUP → GIVE SWEP, ATTACH BAG
 -----------------------------------------------------
-function ENT:PickupBag(ply)
+function BaseBag:PickupBag(ply)
     if not IsValid(ply) or not ply:IsPlayer() then return end
     if self.IsCarried then return end
 
@@ -650,7 +841,7 @@ end
 -----------------------------------------------------
 --  AUTO-LOOT (Money Pot style) + Drop Cooldown
 -----------------------------------------------------
-function ENT:StartTouch(ent)
+function BaseBag:StartTouch(ent)
     if CLIENT then return end
     if not IsValid(ent) then return end
     if ent == self then return end
@@ -698,7 +889,7 @@ end
 -- CLIENT: SWAY / POSITION UPDATES
 --------------------------------------------------------------------
 if CLIENT then
-    function ENT:Think()
+    function BaseBag:Think()
         local ply = self.BagOwner
         if not IsValid(ply) or not self.BasePos or not self.BaseAng then return end
 
@@ -726,4 +917,261 @@ if CLIENT then
         self:SetNextClientThink(CurTime())
         return true
     end
+end
+
+--------------------------------------------------------------------
+-- REGISTRATION
+--------------------------------------------------------------------
+ENT = table.Copy(BaseBag)
+ENT.PrintName = defaultBag.PrintName
+ENT.Category  = defaultBag.Category
+ENT.BagConfig = defaultBag
+
+for className, cfg in pairs(bagDefinitions) do
+    if className ~= "dubz_inventory_bag" then
+        local newEnt = table.Copy(BaseBag)
+        newEnt.PrintName = cfg.PrintName or defaultBag.PrintName
+        newEnt.Category  = cfg.Category or defaultBag.Category
+        newEnt.BagConfig = cfg
+        scripted_ents.Register(newEnt, className)
+    end
+end
+
+--------------------------------------------------------------------
+-- CLIENT UI / INPUT
+--------------------------------------------------------------------
+if CLIENT then
+    local function readNetItem()
+        local item = {}
+        item.class   = net.ReadString()
+        item.name    = net.ReadString()
+        item.model   = net.ReadString()
+        item.quantity= net.ReadUInt(16)
+        item.itemType= net.ReadString()
+        item.material= net.ReadString()
+
+        local subCount = net.ReadUInt(5)
+        item.subMaterials = {}
+        for _ = 1, subCount do
+            local idx = net.ReadUInt(5)
+            local mat = net.ReadString()
+            item.subMaterials[idx] = mat
+        end
+
+        return item
+    end
+
+    local function buildItemPanel(list, item, opts)
+        opts = opts or {}
+
+        local panel = list:Add("DPanel")
+        panel:SetTall(64)
+        panel:Dock(TOP)
+        panel:DockMargin(0, 0, 0, 6)
+        panel.Paint = function(self, w, h)
+            draw.RoundedBox(4, 0, 0, w, h, config.ColorPanel)
+        end
+
+        local icon = vgui.Create("DModelPanel", panel)
+        icon:SetModel(item.model)
+        icon:SetSize(64, 64)
+        icon:Dock(LEFT)
+        icon:SetFOV(20)
+        icon:SetCamPos(Vector(50, 50, 50))
+        icon:SetLookAt(Vector(0, 0, 0))
+        icon.LayoutEntity = function() return end
+
+        if item.material and item.material ~= "" then
+            icon:SetMaterial(item.material)
+        end
+
+        if item.subMaterials then
+            for idx, mat in pairs(item.subMaterials) do
+                icon:SetSubMaterial(idx, mat)
+            end
+        end
+
+        local label = vgui.Create("DLabel", panel)
+        label:Dock(FILL)
+        label:DockMargin(8, 8, 8, 8)
+        label:SetTextColor(config.ColorText)
+        label:SetWrap(true)
+        label:SetText(string.format("%s x%s", item.name, item.quantity or 1))
+
+        panel.ItemData = item
+        panel.DragName = opts.dragName or ""
+        if panel.DragName ~= "" then
+            panel:Droppable(panel.DragName)
+        end
+
+        return panel
+    end
+
+    local function promptAmount(maxAmount, callback)
+        Derma_StringRequest("Drop Quantity", "How many would you like to drop?", tostring(maxAmount), function(text)
+            local num = tonumber(text) or 0
+            num = math.Clamp(math.floor(num), 1, maxAmount)
+            callback(num)
+        end)
+    end
+
+    local function openMenu(container, capacity, items, pocketItems)
+        if not IsValid(container) then return end
+
+        local frame = vgui.Create("DFrame")
+        frame:SetSize(640, 540)
+        frame:Center()
+        frame:SetTitle("Backpack & Pocket")
+        frame:MakePopup()
+
+        local top = vgui.Create("DPanel", frame)
+        top:Dock(TOP)
+        top:SetTall(28)
+        top.Paint = function(self, w, h)
+            draw.RoundedBox(0, 0, 0, w, h, config.ColorBackground)
+        end
+
+        local info = vgui.Create("DLabel", top)
+        info:Dock(LEFT)
+        info:SetTextColor(config.ColorText)
+        info:SetText(string.format("Backpack capacity: %d / %d", #items, capacity))
+        info:DockMargin(8, 6, 0, 0)
+
+        local containerPanel = vgui.Create("DPanel", frame)
+        containerPanel:Dock(FILL)
+        containerPanel:DockPadding(8, 8, 8, 8)
+        containerPanel.Paint = function(self, w, h)
+            draw.RoundedBox(0, 0, 0, w, h, config.ColorBackground)
+        end
+
+        local pocketList = vgui.Create("DScrollPanel", containerPanel)
+        pocketList:Dock(LEFT)
+        pocketList:SetWide(300)
+        pocketList:DockMargin(0, 0, 4, 0)
+
+        local bagList = vgui.Create("DScrollPanel", containerPanel)
+        bagList:Dock(FILL)
+
+        local dropZone = vgui.Create("DPanel", containerPanel)
+        dropZone:Dock(BOTTOM)
+        dropZone:SetTall(60)
+        dropZone:DockMargin(0, 8, 0, 0)
+        dropZone.Paint = function(self, w, h)
+            draw.RoundedBox(4, 0, 0, w, h, config.ColorPanel)
+            draw.SimpleText("Drag here to drop items", "DermaDefaultBold", w / 2, h / 2, config.ColorText, TEXT_ALIGN_CENTER, TEXT_ALIGN_CENTER)
+        end
+
+        bagList:Receiver("DubzPocketItem", function(_, panels, drop)
+            if not drop then return end
+            local item = panels[1].ItemData
+            if not item then return end
+
+            net.Start("DubzInventory_PocketAction")
+            net.WriteEntity(container)
+            net.WriteString("pocket_to_bag")
+            net.WriteUInt(item.pocketIndex or 0, 8)
+            net.SendToServer()
+        end)
+
+        dropZone:Receiver("DubzPocketItem", function(_, panels, drop)
+            if not drop then return end
+            local item = panels[1].ItemData
+            if not item then return end
+
+            net.Start("DubzInventory_PocketAction")
+            net.WriteEntity(container)
+            net.WriteString("drop_pocket")
+            net.WriteUInt(item.pocketIndex or 0, 8)
+            net.SendToServer()
+        end)
+
+        dropZone:Receiver("DubzBagItem", function(_, panels, drop)
+            if not drop then return end
+            local item = panels[1].ItemData
+            if not item then return end
+            local maxAmount = item.quantity or 1
+            promptAmount(maxAmount, function(amount)
+                net.Start("DubzInventory_Action")
+                net.WriteEntity(container)
+                net.WriteUInt(item.index or 0, 8)
+                net.WriteString("drop")
+                net.WriteUInt(amount, 16)
+                net.SendToServer()
+            end)
+        end)
+
+        for _, data in ipairs(pocketItems) do
+            local panel = buildItemPanel(pocketList, data, { dragName = "DubzPocketItem" })
+            panel.DoClick = function()
+                net.Start("DubzInventory_PocketAction")
+                net.WriteEntity(container)
+                net.WriteString("drop_pocket")
+                net.WriteUInt(data.pocketIndex or 0, 8)
+                net.SendToServer()
+            end
+        end
+
+        for idx, data in ipairs(items) do
+            data.index = idx
+            local panel = buildItemPanel(bagList, data, { dragName = "DubzBagItem" })
+            panel.DoClick = function()
+                net.Start("DubzInventory_Action")
+                net.WriteEntity(container)
+                net.WriteUInt(idx, 8)
+                net.WriteString("use")
+                net.WriteUInt(1, 16)
+                net.SendToServer()
+            end
+        end
+    end
+
+    net.Receive("DubzInventory_Open", function()
+        local container = net.ReadEntity()
+        local capacity  = net.ReadUInt(8)
+        local count     = net.ReadUInt(8)
+        local items     = {}
+        for _ = 1, count do
+            table.insert(items, readNetItem())
+        end
+
+        local pocketCount = net.ReadUInt(8)
+        local pocketItems = {}
+        for _ = 1, pocketCount do
+            local item = readNetItem()
+            item.pocketIndex = net.ReadUInt(8)
+            table.insert(pocketItems, item)
+        end
+
+        openMenu(container, capacity, items, pocketItems)
+    end)
+
+    net.Receive("DubzInventory_Tip", function()
+        local msg = net.ReadString()
+        notification.AddLegacy(msg, NOTIFY_GENERIC, 3)
+        surface.PlaySound("buttons/button15.wav")
+    end)
+
+    hook.Add("PlayerButtonDown", "DubzInventory_OpenKey", function(ply, button)
+        if ply ~= LocalPlayer() then return end
+        if button ~= (config.BackpackKey or KEY_B) then return end
+
+        net.Start("DubzInventory_RequestOpen")
+        net.SendToServer()
+    end)
+end
+
+--------------------------------------------------------------------
+-- SERVER CLEANUP HOOKS
+--------------------------------------------------------------------
+if SERVER then
+    hook.Add("PlayerDisconnected", "DubzInventory_Cleanup", function(ply)
+        if not IsValid(ply.DubzInventoryBag) then return end
+        ply.DubzInventoryBag:DropFromPlayer(ply)
+    end)
+
+    hook.Add("PlayerDeath", "DubzInventory_DropOnDeath", function(ply)
+        if not IsValid(ply.DubzInventoryBag) then return end
+        ply.DubzInventoryBag:DropFromPlayer(ply)
+        ply:StripWeapon("dubz_inventory")
+    end)
 end
